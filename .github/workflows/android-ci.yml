@@ -1,0 +1,142 @@
+name: Android CI Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "构建类型"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - debug
+          - release
+      build_target:
+        description: "产物类型"
+        required: true
+        default: "apk"
+        type: choice
+        options:
+          - apk
+          - aab
+      builder:
+        description: "构建人"
+        required: false
+        default: ""
+        type: string
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  android-build:
+    runs-on: ubuntu-latest
+
+    env:
+      APP_NAME: android-app
+      BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
+      BUILD_TARGET: ${{ github.event.inputs.build_target || 'apk' }}
+      BUILDER: ${{ github.event.inputs.builder || github.actor }}
+      FEISHU_BOT_WEBHOOK: ${{ secrets.FEISHU_BOT_WEBHOOK }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Check Build Environment
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --version
+
+      - name: Build Android
+        run: |
+          BUILD_TYPE_CAP="$(echo "${BUILD_TYPE}" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')"
+
+          if [ "${BUILD_TARGET}" = "aab" ]; then
+            TASK="bundle${BUILD_TYPE_CAP}"
+          else
+            TASK="assemble${BUILD_TYPE_CAP}"
+          fi
+
+          echo "Run Gradle task: :app:${TASK}"
+          ./gradlew ":app:${TASK}" --stacktrace --build-cache
+
+      - name: Find Artifact
+        id: artifact
+        run: |
+          ARTIFACT_PATH="$(find app/build/outputs -type f -name "*.${BUILD_TARGET}" | head -n 1)"
+
+          if [ -z "${ARTIFACT_PATH}" ]; then
+            echo "No .${BUILD_TARGET} artifact found"
+            exit 1
+          fi
+
+          ARTIFACT_NAME="$(basename "${ARTIFACT_PATH}")"
+          echo "artifact_path=${ARTIFACT_PATH}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Found artifact: ${ARTIFACT_PATH}"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ env.BUILD_TYPE }}-${{ github.run_number }}
+          path: ${{ steps.artifact.outputs.artifact_path }}
+          retention-days: 14
+
+      - name: Notify Feishu Success
+        if: success()
+        run: |
+          curl -X POST "${FEISHU_BOT_WEBHOOK}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "template": "green",
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "Android 打包成功"
+                  }
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**项目**：${{ env.APP_NAME }}\n**类型**：${{ env.BUILD_TYPE }} / ${{ env.BUILD_TARGET }}\n**产物**：${{ steps.artifact.outputs.artifact_name }}\n**分支**：${{ github.ref_name }}\n**Commit**：${{ github.sha }}\n**构建人**：${{ env.BUILDER }}\n**构建地址**：[查看 Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+                  }
+                ]
+              }
+            }'
+
+      - name: Notify Feishu Failure
+        if: failure()
+        run: |
+          curl -X POST "${FEISHU_BOT_WEBHOOK}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "msg_type": "interactive",
+              "card": {
+                "header": {
+                  "template": "red",
+                  "title": {
+                    "tag": "plain_text",
+                    "content": "Android 打包失败"
+                  }
+                },
+                "elements": [
+                  {
+                    "tag": "markdown",
+                    "content": "**项目**：${{ env.APP_NAME }}\n**类型**：${{ env.BUILD_TYPE }} / ${{ env.BUILD_TARGET }}\n**分支**：${{ github.ref_name }}\n**Commit**：${{ github.sha }}\n**构建人**：${{ env.BUILDER }}\n**失败日志**：[查看 Actions](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+                  }
+                ]
+              }
+            }'
