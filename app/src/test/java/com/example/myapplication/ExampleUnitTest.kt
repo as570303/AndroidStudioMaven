@@ -1,4 +1,4 @@
-package com.mao.mavenpublishproject
+package com.example.myapplication
 
 import org.junit.Test
 
